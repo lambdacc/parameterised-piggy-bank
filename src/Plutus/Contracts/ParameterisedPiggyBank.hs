@@ -57,7 +57,7 @@ PlutusTx.makeIsDataIndexed ''MyRedeemer [('MyRedeemer, 0)]-}
 
 {-# INLINABLE mkValidator #-}
 mkValidator :: PPBParam -> () -> () -> ScriptContext -> Bool
-mkValidator p _ _ ctx =
+mkValidator p () () ctx =
     {-isValid &&-}
     hasSufficientAmount &&
     signedByBeneficiary
@@ -93,14 +93,14 @@ typedValidator p = Scripts.mkTypedValidator @Typed
     where
         wrap = Scripts.wrapValidator @() @()
 
-validator :: Validator
+validator :: PPBParam -> Validator
 validator = Scripts.validatorScript . typedValidator
 
-valHash :: Ledger.ValidatorHash
-valHash = Scripts.validatorHash typedValidator
+valHash :: PPBParam ->  Ledger.ValidatorHash
+valHash = Scripts.validatorHash . typedValidator
 
-scrAddress :: Ledger.Address
-scrAddress = scriptAddress validator
+scrAddress :: PPBParam ->  Ledger.Address
+scrAddress = scriptAddress . validator
 
 data PutParams = PutParams
     { ppBeneficiary :: !PubKeyHash
@@ -108,16 +108,16 @@ data PutParams = PutParams
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
     
 type ParameterisedPiggyBankSchema =
-            Endpoint "put" Integer
+            Endpoint "put" PutParams
         .\/ Endpoint "empty" ()
         .\/ Endpoint "inspect" ()
 
 put :: AsContractError e => PutParams -> Contract w s e ()
 put pp = do
     let p  = PPBParam
-                    { beneficiary = gpBeneficiary gp
+                    { beneficiary = ppBeneficiary pp
                     }
-    utxos <- utxoAt scrAddress
+    utxos <- utxoAt $ scrAddress p
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
     logInfo @String $ "Putting to piggy bank currently holding "
@@ -127,11 +127,14 @@ put pp = do
     let tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ ppAmount pp
     ledgerTx <- submitTxConstraints (typedValidator p) tx
     void $ awaitTxConfirmed $ txId ledgerTx
-    logInfo @String $ printf "Put %d lovelaces in the piggy bank" amount
+    logInfo @String $ printf "Put %d lovelaces in the piggy bank" <> show $ ppAmount pp
 
-empty :: forall w s e. AsContractError e => Contract w s e ()
-empty = do
-    utxos <- utxoAt scrAddress
+empty :: forall w s e. AsContractError e => PutParams -> Contract w s e ()
+empty pp = do
+    let p  = PPBParam
+                        { beneficiary = ppBeneficiary pp
+                        }
+    utxos <- utxoAt $ scrAddress p
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
     logInfo @String
@@ -141,20 +144,23 @@ empty = do
         <> show totalVal
     pkh   <- pubKeyHash <$> ownPubKey
     let p  = PPBParam
-                        { beneficiary = gpBeneficiary gp
+                        { beneficiary = ppBeneficiary pp
                         }
     let orefs   = fst <$> Map.toList utxos
         lookups = Constraints.unspentOutputs utxos <>
                   Constraints.otherScript (validator p)
         tx :: TxConstraints Void Void
-        tx      = mconcat [mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toData () | oref <- orefs]
+        tx      = mconcat [mustSpendScriptOutput oref $ Redeemer $ toBuiltinData () | oref <- orefs]
     ledgerTx <- submitTxConstraintsWith @Void lookups tx
     handleError (\err -> Contract.logInfo $ "caught error: " ++ unpack err) $ void $ awaitTxConfirmed $ txId ledgerTx
     logInfo @String $ "Emptied piggy bank."
 
-inspect :: forall w s e. AsContractError e => Contract w s e ()
-inspect = do
-    utxos <- utxoAt scrAddress
+inspect :: forall w s e. AsContractError e => PutParams -> Contract w s e ()
+inspect pp = do
+    let p  = PPBParam
+                    { beneficiary = ppBeneficiary pp
+                    }
+    utxos <- utxoAt $ scrAddress p
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
     logInfo @String
@@ -170,12 +176,12 @@ put' :: Promise () ParameterisedPiggyBankSchema Text ()
 put' = endpoint @"put" put
 
 empty' :: Promise () ParameterisedPiggyBankSchema Text ()
-empty' = endpoint @"empty" empty
+empty' = endpoint @"empty" empty PutParams
 
 inspect' :: Promise () ParameterisedPiggyBankSchema Text ()
 inspect' = endpoint @"inspect" inspect
 
-endpoints :: AsContractError e => Contract () ParameterisedPiggyBankSchema Text e
+endpoints :: AsContractError e => PutParams Contract () ParameterisedPiggyBankSchema Text e
 endpoints = do
     logInfo @String "Waiting for put or empty."
     selectList [put', empty', inspect'] >>  endpoints
