@@ -27,7 +27,7 @@ common lang
 library
     import: lang
     exposed-modules:
-      Plutus.Contracts.PiggyBank2
+      Plutus.Contracts.ParameterisedPiggyBank
     build-depends:
       base >= 4.9 && < 5,
       aeson,
@@ -44,7 +44,7 @@ library
       plutus-ledger-api
     hs-source-dirs: src/
 
-executable pb-two
+executable ppb
   import: lang
   main-is: Main.hs
   hs-source-dirs: pab
