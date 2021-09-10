@@ -1,6 +1,7 @@
-# Shared Piggy Bank
+# TODO Update readme
+# Parametrised Piggy Bank
 
-This repo houses a simple Plutus Contract that acts as a shared piggy bank.
+This repo houses a simple Plutus Contract that acts as a parametrised shared piggy bank.
 
 ## Setting up
 
@@ -32,7 +33,7 @@ Afterwards, the command `cabal build server` from the terminal should work (if `
 With the PAB we can serve and interact with contracts over a web API.
 You can read more about the PAB here: [PAB Architecture](https://github.com/input-output-hk/plutus/blob/master/plutus-pab/ARCHITECTURE.adoc).
 
-Here, the PAB is configured with one contract, the `PiggyBank` contract from `./src/Plutus/Contracts/PiggyBank.hs`.
+Here, the PAB is configured with one contract, the `ParametrisedPiggyBank` contract from `./src/Plutus/Contracts/ParametrisedPiggyBank.hs`.
 
 Here's an example of running and interacting with this contract via the API. For this it will help if you have `jq` installed.
 
