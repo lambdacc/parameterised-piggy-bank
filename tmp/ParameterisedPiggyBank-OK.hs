@@ -49,6 +49,11 @@ data PPBParam = PPBParam
     } deriving Show
 
 PlutusTx.makeLift ''PPBParam
+{-
+newtype MyRedeemer = MyRedeemer Bool
+    deriving (FromJSON, ToJSON, ToSchema)
+
+PlutusTx.makeIsDataIndexed ''MyRedeemer [('MyRedeemer, 0)]-}
 
 {-# INLINABLE mkValidator #-}
 mkValidator :: PPBParam -> () -> () -> ScriptContext -> Bool
@@ -125,7 +130,7 @@ put pp =
     logInfo @String $ printf "Put %d lovelaces in the piggy bank" <> show $ ppAmount pp
 
 empty :: AsContractError e => PutParams -> Contract w s e ()
-empty _ =
+empty pp =
   do
     pkh   <- pubKeyHash <$> ownPubKey
     let p  = PPBParam{ beneficiary = pkh
