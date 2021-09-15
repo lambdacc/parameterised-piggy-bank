@@ -14,8 +14,7 @@
 {-# OPTIONS_GHC -fno-warn-unused-imports   #-}
 {-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
-module Plutus.Contracts.ParameterisedPiggyBank
-(inValue,checkAmount,endpoints, ParameterisedPiggyBankSchema, {-MyRedeemer (..)-}) where
+module Plutus.Contracts.ParameterisedPiggyBank where
 
 import           Control.Monad        hiding (fmap)
 import           Data.Aeson           (ToJSON, FromJSON)
@@ -24,7 +23,22 @@ import           Data.Text            (Text, unpack)
 import           Data.Monoid          (Last (..))
 import           Data.Void            (Void)
 import           GHC.Generics         (Generic)
-import           Plutus.Contract
+import Plutus.Contract
+    ( logInfo,
+      awaitTxConfirmed,
+      endpoint,
+      ownPubKey,
+      submitTxConstraints,
+      submitTxConstraintsWith,
+      utxoAt,
+      handleError,
+      selectList,
+      Endpoint,
+      Contract,
+      Promise,
+      AsContractError,
+      type (.\/) )
+import           Plutus.Contract.Types
 import           PlutusTx             (toBuiltinData)
 import qualified PlutusTx
 import           PlutusTx.Prelude     hiding (Semigroup(..), unless)
@@ -36,24 +50,48 @@ import           Ledger.Ada           as Ada
 import           Playground.Contract  (printJson, printSchemas, ensureKnownCurrencies, stage, ToSchema)
 import           Playground.TH        (mkKnownCurrencies, mkSchemaDefinitions)
 import           Playground.Types     (KnownCurrency (..))
-import           Prelude              (IO, Semigroup (..), String)
+import           Prelude              (IO, Semigroup (..), String, Show (..))
 import           Text.Printf          (printf)
 import           Data.Text.Prettyprint.Doc.Extras (PrettyShow (..))
-import           Prelude              (Semigroup (..), Show (..))
 import           Plutus.Contract       as Contract
 import           Plutus.V1.Ledger.Value (Value (..), assetClass, assetClassValueOf)
 
 
-data PPBParam = PPBParam
+-- A value which initates 
+data PutParams = PutParams
+    { ppBeneficiary :: !PubKeyHash
+    , ppAmount      :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, ToSchema, Show)
+
+-- A beneficiary gets their own script address
+newtype BankParam = BankParam
     { beneficiary :: PubKeyHash
     } deriving Show
 
-PlutusTx.makeLift ''PPBParam
+-- Endpoints of schema
+type ParameterisedPiggyBankSchema =
+            Endpoint "put" PutParams
+        .\/ Endpoint "empty" ()
+        .\/ Endpoint "inspect" PutParams
 
+{- 
+    Typed validator instance (probably should be PiggyTyped)
+    There's no Datum even though you might think there is one from PutParams
+-}
+data Bank
+instance Scripts.ValidatorTypes Bank where
+    type instance DatumType Bank    = ()
+    type instance RedeemerType Bank = ()
+
+PlutusTx.makeLift ''BankParam
+
+{- 
+    here p is to get validate the scriptAddress needs the beneficiary to have signed the current context 
+    Remember, no datum or redeemer (since it's checking the person's own signature)
+-}
 {-# INLINABLE mkValidator #-}
-mkValidator :: PPBParam -> () -> () -> ScriptContext -> Bool
-mkValidator p () () ctx =
-    {-isValid &&-}
+mkValidator :: BankParam -> () -> () -> ScriptContext -> Bool
+mkValidator bp () () ctx =
     hasSufficientAmount &&
     signedByBeneficiary
 
@@ -66,94 +104,86 @@ mkValidator p () () ctx =
           traceIfFalse "Sorry. Not enough lovelace" $ checkAmount $ inValue contextTxInfo
 
       signedByBeneficiary :: Bool
-      signedByBeneficiary = txSignedBy contextTxInfo $ beneficiary p
+      signedByBeneficiary = txSignedBy contextTxInfo $ beneficiary bp
 
 {-# INLINABLE inValue #-}
 inValue :: TxInfo -> Value
-inValue txInfo = valueSpent txInfo
+inValue = valueSpent
 
 {-# INLINABLE checkAmount #-}
 checkAmount :: Value -> Bool
-checkAmount val = (assetClassValueOf val $ assetClass Ada.adaSymbol Ada.adaToken) > 1000000
+checkAmount val = assetClassValueOf val (assetClass Ada.adaSymbol Ada.adaToken) > 1000000
 
-data Typed
-instance Scripts.ValidatorTypes Typed where
-    type instance DatumType Typed    = ()
-    type instance RedeemerType Typed = ()
 
-typedValidator :: PPBParam -> Scripts.TypedValidator Typed
-typedValidator p = Scripts.mkTypedValidator @Typed
+typedValidator :: BankParam -> Scripts.TypedValidator Bank
+typedValidator p = Scripts.mkTypedValidator @Bank
     ($$(PlutusTx.compile [|| mkValidator ||]) `PlutusTx.applyCode` PlutusTx.liftCode p)
     $$(PlutusTx.compile [|| wrap ||])
     where
         wrap = Scripts.wrapValidator @() @()
 
-validator :: PPBParam -> Validator
+
+validator :: BankParam -> Validator
 validator = Scripts.validatorScript . typedValidator
 
-valHash :: PPBParam ->  Ledger.ValidatorHash
+valHash :: BankParam ->  Ledger.ValidatorHash
 valHash = Scripts.validatorHash . typedValidator
 
-scrAddress :: PPBParam ->  Ledger.Address
+{-
+    scrAddress needs the PPBParam (for the beneficiary!)
+-}
+scrAddress :: BankParam ->  Ledger.Address
 scrAddress = scriptAddress . validator
 
-data PutParams = PutParams
-    { ppBeneficiary :: !PubKeyHash
-    , ppAmount      :: !Integer
-    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+put :: AsContractError e => PutParams -> Contract w ParameterisedPiggyBankSchema e ()
+put pp = do
+    -- must create the PPBParam to get the address
+    let bp  = BankParam
+                    { beneficiary = ppBeneficiary pp
+                    }
     
-type ParameterisedPiggyBankSchema =
-            Endpoint "put" PutParams
-        .\/ Endpoint "empty" PutParams
-        .\/ Endpoint "inspect" PutParams
-
-put :: AsContractError e => PutParams -> Contract w s e ()
-put pp =
-  do
-    let p  = PPBParam { beneficiary = ppBeneficiary pp
-                       }
-    utxos <- utxoAt $ scrAddress p
+    -- Got the address
+    utxos <- utxoAt $ scrAddress bp
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
+    
     logInfo @String $ "Putting to piggy bank currently holding "
             ++ show numInputs
             ++ " outputs with a total value of "
             ++ show totalVal
     let tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ ppAmount pp
-    ledgerTx <- submitTxConstraints (typedValidator p) tx
+    ledgerTx <- submitTxConstraints (typedValidator bp) tx
     void $ awaitTxConfirmed $ txId ledgerTx
     logInfo @String $ printf "Put %d lovelaces in the piggy bank" <> show $ ppAmount pp
 
-empty :: AsContractError e => PutParams -> Contract w s e ()
-empty _ =
-  do
-    pkh   <- pubKeyHash <$> ownPubKey
-    let p  = PPBParam{ beneficiary = pkh
-                      }
-    utxos <- utxoAt $ scrAddress p
+empty :: forall w s e. (AsContractError e)=> () -> Contract w s e () 
+empty _ = do
+    pkh <- pubKeyHash <$> ownPubKey
+    let bp  = BankParam
+                        { beneficiary = pkh
+                        }
+    utxos <- utxoAt $ scrAddress bp
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
-    logInfo @String
-        $ "Attempting to empty piggy bank currently holding "
+    logInfo @String $ "Attempting to empty piggy bank currently holding "
         <> show numInputs
         <> " outputs with a total value of "
         <> show totalVal
     let orefs   = fst <$> Map.toList utxos
         lookups = Constraints.unspentOutputs utxos <>
-                  Constraints.otherScript (validator p)
+                  Constraints.otherScript (validator bp)
         tx :: TxConstraints Void Void
         tx      = mconcat [mustSpendScriptOutput oref $ Redeemer $ toBuiltinData () | oref <- orefs]
     ledgerTx <- submitTxConstraintsWith @Void lookups tx
     handleError (\err -> Contract.logInfo $ "caught error: " ++ unpack err) $ void $ awaitTxConfirmed $ txId ledgerTx
     logInfo @String $ "Emptied piggy bank."
 
-inspect :: AsContractError e => PutParams -> Contract w s e ()
-inspect pp =
-  do
-    let p  = PPBParam
+inspect :: forall w s e. AsContractError e => PutParams -> Contract w s e ()
+inspect pp = do
+    let bp  = BankParam
                     { beneficiary = ppBeneficiary pp
                     }
-    utxos <- utxoAt $ scrAddress p
+    utxos <- utxoAt $ scrAddress bp
     let totalVal = Plutus.foldMap (txOutValue . txOutTxOut) $ snd <$> Map.toList utxos
         numInputs = Map.size utxos
     logInfo @String
@@ -168,16 +198,14 @@ inspect pp =
 put' :: Promise () ParameterisedPiggyBankSchema Text ()
 put' = endpoint @"put" put
 
-empty' :: Promise () ParameterisedPiggyBankSchema Text ()
-empty' = endpoint @"empty" empty
-
 inspect' :: Promise () ParameterisedPiggyBankSchema Text ()
 inspect' = endpoint @"inspect" inspect
 
+empty' :: Promise () ParameterisedPiggyBankSchema Text ()
+empty' = endpoint @"empty" empty
+
 endpoints :: AsContractError e => Contract () ParameterisedPiggyBankSchema Text e
-endpoints =
-  do
-    logInfo @String "Waiting for put or empty."
-    selectList [put', empty', inspect'] >>  endpoints
+endpoints = do
+    selectList [put', inspect', empty'] >> endpoints
 
 
